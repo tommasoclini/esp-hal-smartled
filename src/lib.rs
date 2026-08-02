@@ -3,7 +3,7 @@
 //! Different from [ws2812-esp32-rmt-driver](https://crates.io/crates/ws2812-esp32-rmt-driver), which is based on the unofficial `esp-idf` SDK, this crate is based on the official no-std [esp-hal](https://github.com/esp-rs/esp-hal).
 //!
 //! This driver uses either the blocking RMT API, or the async one, depending on the given RMT channel.
-//! The [`SmartLedsWrite`] trait (or [`SmartLedsWriteAsync`]) is implemented for [`RmtSmartLeds`] with the corresponding channel mode.
+//! The [`SmartLedsWrite`] trait (or [`SmartLedsWriteAsync`]) is implemented with the corresponding channel mode.
 //!
 //! ## Example
 //!
@@ -19,7 +19,7 @@
 //!
 //! ## Usage overview
 //!
-//! The [`RmtSmartLeds`] struct implements [`SmartLedsWrite`] or [`SmartLedsWriteAsync`]
+//! The [`RmtSmartLeds`] struct wrapped with [`Handle`] implements [`SmartLedsWrite`] or [`SmartLedsWriteAsync`]
 //! and can be used to send color data to connected LEDs.
 //! To initialize a [`RmtSmartLeds`], use [`RmtSmartLeds::new`],
 //! which takes an RMT channel and a [`PeripheralOutput`].
@@ -35,7 +35,7 @@
 #![deny(missing_docs)]
 #![no_std]
 
-use core::{fmt::Debug, marker::PhantomData};
+use core::{borrow::BorrowMut, fmt::Debug, marker::PhantomData};
 
 pub use color_order::ColorOrder;
 use esp_hal::{
@@ -66,11 +66,11 @@ pub struct Timing {
     pub time_1_low: u16,
     /// High time for one pulse, in nanoseconds.
     pub time_1_high: u16,
-    /// Time for the reset that is required in between transmissions, in nanoseconds.
-    pub reset: u16,
+    /// Time for the reset that is required in between transmissions, in microseconds.
+    pub reset_us: u16,
 }
 
-const WS28XX_RESET: u16 = 50_000;
+const WS28XX_RESET: u16 = 50;
 
 const SK68XX_CODE_PERIOD: u16 = 1200;
 const SK68XX_TIME_0_HIGH: u16 = 320;
@@ -81,7 +81,7 @@ pub const SK68XX_TIMING: Timing = Timing {
     time_0_low: SK68XX_CODE_PERIOD - SK68XX_TIME_0_HIGH,
     time_1_high: SK68XX_TIME_1_HIGH,
     time_1_low: SK68XX_CODE_PERIOD - SK68XX_TIME_1_HIGH,
-    reset: WS28XX_RESET,
+    reset_us: WS28XX_RESET,
 };
 
 /// Timing for the WS2812B LEDs.
@@ -90,7 +90,7 @@ pub const WS2812B_TIMING: Timing = Timing {
     time_0_low: 800,
     time_1_high: 850,
     time_1_low: 450,
-    reset: WS28XX_RESET,
+    reset_us: WS28XX_RESET,
 };
 
 /// Timing for the WS2812 LEDs.
@@ -99,7 +99,7 @@ pub const WS2812_TIMING: Timing = Timing {
     time_0_low: 700,
     time_1_high: 800,
     time_1_low: 600,
-    reset: WS28XX_RESET,
+    reset_us: WS28XX_RESET,
 };
 
 /// Timing for the WS2811 driver ICs, low-speed mode.
@@ -108,7 +108,7 @@ pub const WS2811_LOW_SPEED_TIMING: Timing = Timing {
     time_0_low: 2000,
     time_1_high: 1200,
     time_1_low: 1300,
-    reset: WS28XX_RESET,
+    reset_us: WS28XX_RESET,
 };
 
 /// Timing for the WS2811 driver ICs, high-speed mode.
@@ -117,7 +117,7 @@ pub const WS2811_TIMING: Timing = Timing {
     time_0_low: WS2811_LOW_SPEED_TIMING.time_0_low / 2,
     time_1_high: WS2811_LOW_SPEED_TIMING.time_1_high / 2,
     time_1_low: WS2811_LOW_SPEED_TIMING.time_1_low / 2,
-    reset: WS28XX_RESET,
+    reset_us: WS28XX_RESET,
 };
 
 /// All types of errors that can happen during the conversion and transmission
@@ -214,7 +214,7 @@ pub const fn buffer_size<C: Color>(led_count: usize) -> usize {
     //   * channels
     //   * pulses per channel (=bitcount)
     //  ) + 1 additional pulse for the end delimiter + 1 reset
-    led_count * (size_of::<C::ChannelType>() * 8) * C::CHANNELS as usize + 2
+    led_count * (size_of::<C::ChannelType>() * 8) * C::CHANNELS as usize + 1
 }
 
 /// Common [`ColorOrder`] implementations.
@@ -322,14 +322,18 @@ pub mod color_order {
 ///   This determines the color model and number of channels to be sent.
 /// - The [`ColorOrder`].
 ///   This determines what order the LED expects the color values in.
+///
+/// This type also supports runtime configurations, like:
 /// - The [`Timing`].
 ///   This determines the smart LED type in use; what kind of signal it expects.
 ///   Several implementations for common LED types like WS2812 are provided.
 ///   Note that many WS2812-like LEDs are at least almost compatible in their timing, even though the datasheets specify different amounts, the other LEDs’ values are within the tolerance range, and even exceeding these, many LEDs continue to work beyond their specified timing range.
 ///   It is however recommended to use the corresponding LED type, or implement your own when needed.
 ///
-/// When the driver mode is [`Blocking`], this type implements the blocking [`SmartLedsWrite`] interface.
-/// When the driver mode is [`Async`], this type implements the [`SmartLedsWriteAsync`] interface instead.
+///   This is set when creating the driver, but can be set again with [`RmtSmartLeds::set_timing`].
+///
+/// When the driver mode is [`Blocking`], with [`Handle`] this type implements the blocking [`SmartLedsWrite`] interface.
+/// When the driver mode is [`Async`], with [`Handle`] this type implements the [`SmartLedsWriteAsync`] interface instead.
 /// (You usually don’t need to choose this manually, Rust can deduce it from the passed-in RMT channel.)
 pub struct RmtSmartLeds<'d, const BUFFER_SIZE: usize, Mode, C, Order>
 where
@@ -342,7 +346,7 @@ where
     buffer_valid: bool,
     zero_pulse: PulseCode,
     one_pulse: PulseCode,
-    reset_pulse: PulseCode,
+    reset_us: u16,
     _order: PhantomData<Order>,
     _color: PhantomData<C>,
 }
@@ -365,17 +369,6 @@ const fn one_pulse(t: &Timing, src_clock_mhz: u32) -> PulseCode {
         ((t.time_1_high as u32 * src_clock_mhz * 2) / 1000) as u16,
         Level::Low,
         ((t.time_1_low as u32 * src_clock_mhz * 2) / 1000) as u16,
-    )
-}
-
-/// Returns the reset pulse code, given the RMT source clock’s speed in MHz.
-const fn reset_pulse(t: &Timing, src_clock_mhz: u32) -> PulseCode {
-    let reset_half = (t.reset / 2) as u32;
-    PulseCode::new(
-        Level::Low,
-        ((reset_half * src_clock_mhz * 2) / 1000) as u16,
-        Level::Low,
-        ((reset_half * src_clock_mhz * 2) / 1000) as u16,
     )
 }
 
@@ -435,7 +428,7 @@ where
 
         let channel = channel.configure_tx(&config)?.with_pin(pin);
 
-        let (zero_pulse, one_pulse, reset_pulse) = Self::get_timings_for(&timing);
+        let (zero_pulse, one_pulse) = Self::get_timings_for(&timing);
 
         Ok(Self {
             channel: Some(channel),
@@ -443,32 +436,28 @@ where
             buffer_valid: false,
             zero_pulse,
             one_pulse,
-            reset_pulse,
+            reset_us: timing.reset_us,
             _order: PhantomData,
             _color: PhantomData,
         })
     }
 
-    /// Returns (zero_pulse, one_pulse, reset_pulse)
-    fn get_timings_for(t: &Timing) -> (PulseCode, PulseCode, PulseCode) {
+    /// Returns (zero_pulse, one_pulse)
+    fn get_timings_for(t: &Timing) -> (PulseCode, PulseCode) {
         // Assume the RMT peripheral is set up to use the APB clock
         let clocks = Clocks::get();
         // convert to the MHz value to simplify nanosecond calculations
         let src_clock = clocks.apb_clock.as_hz() / 1_000_000;
 
-        (
-            zero_pulse(t, src_clock),
-            one_pulse(&t, src_clock),
-            reset_pulse(&t, src_clock),
-        )
+        (zero_pulse(t, src_clock), one_pulse(&t, src_clock))
     }
 
     /// Modifies the timing for the LED driver.
     pub fn set_timing(&mut self, t: Timing) {
-        let (zero_pulse, one_pulse, reset_pulse) = Self::get_timings_for(&t);
+        let (zero_pulse, one_pulse) = Self::get_timings_for(&t);
         self.zero_pulse = zero_pulse;
         self.one_pulse = one_pulse;
-        self.reset_pulse = reset_pulse;
+        self.reset_us = t.reset_us;
         self.buffer_valid = false;
     }
 
@@ -493,8 +482,6 @@ where
             )?;
         }
 
-        // add a reset
-        *seq_iter.next().ok_or(AdapterError::BufferSizeExceeded)? = self.reset_pulse;
         // Finally, add an end element.
         *seq_iter.next().ok_or(AdapterError::BufferSizeExceeded)? = PulseCode::end_marker();
 
@@ -526,44 +513,122 @@ where
     }
 }
 
-impl<'d, const BUFFER_SIZE: usize, C, Order> RmtSmartLeds<'d, BUFFER_SIZE, Blocking, C, Order>
+/// Handle struct that puts together an `RmtSmartLeds` and a delay to be able
+/// to drive the led strip correctly, using the delay after the transmission
+/// for the reset signal, which indicates end of data transmissionto the led.
+///
+/// We can't store the delay directly inside the driver because the embedded-hal
+/// delay traits take mutable references.
+/// This enables using a single timer as a delay source without having to rely
+/// on `embassy-time` or something similar.
+///
+/// Because of this, this handle is necessary, and it can store either owned versions
+/// or mutable references to the driver and the delay, allowing flexibility in
+/// the usage of the API.
+///
+/// The handle also lets users access the driver with `Deref`/`DerefMut`, so that
+/// there is no function duplication.
+pub struct Handle<'d, D, DriverBorrow, const BUFFER_SIZE: usize, Mode, C, Order>
 where
+    Mode: DriverMode,
     C: Color,
     Order: ColorOrder<C>,
 {
+    delay: D,
+    driver: DriverBorrow,
+    _m: PhantomData<(&'d (), Mode, C, Order)>,
+}
+
+impl<'d, D, DriverBorrow, const BUFFER_SIZE: usize, Mode, C, Order> core::ops::Deref
+    for Handle<'d, D, DriverBorrow, BUFFER_SIZE, Mode, C, Order>
+where
+    Mode: DriverMode,
+    C: Color,
+    Order: ColorOrder<C>,
+{
+    type Target = DriverBorrow;
+
+    fn deref(&self) -> &Self::Target {
+        &self.driver
+    }
+}
+
+impl<'d, D, DriverBorrow, const BUFFER_SIZE: usize, Mode, C, Order> core::ops::DerefMut
+    for Handle<'d, D, DriverBorrow, BUFFER_SIZE, Mode, C, Order>
+where
+    Mode: DriverMode,
+    C: Color,
+    Order: ColorOrder<C>,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.driver
+    }
+}
+
+impl<'d, D, DriverBorrow, const BUFFER_SIZE: usize, Mode, C, Order>
+    Handle<'d, D, DriverBorrow, BUFFER_SIZE, Mode, C, Order>
+where
+    Mode: DriverMode,
+    C: Color,
+    Order: ColorOrder<C>,
+    DriverBorrow: BorrowMut<RmtSmartLeds<'d, BUFFER_SIZE, Mode, C, Order>>,
+{
+    /// a
+    pub fn new(driver: DriverBorrow, delay: D) -> Self {
+        Self {
+            delay,
+            driver,
+            _m: PhantomData,
+        }
+    }
+}
+
+impl<'d, D: embedded_hal::delay::DelayNs, DriverBorrow, const BUFFER_SIZE: usize, C, Order>
+    Handle<'d, D, DriverBorrow, BUFFER_SIZE, Blocking, C, Order>
+where
+    C: Color,
+    Order: ColorOrder<C>,
+    DriverBorrow: BorrowMut<RmtSmartLeds<'d, BUFFER_SIZE, Blocking, C, Order>>,
+{
     /// Transmit existing LED data via the RMT peripheral.
     pub fn flush(&mut self) -> Result<(), AdapterError> {
-        if !self.buffer_valid {
+        let driver = self.driver.borrow_mut();
+
+        if !driver.buffer_valid {
             return Err(AdapterError::BufferNotReady);
         }
         // Perform the actual RMT operation. We use the u32 values here right away.
-        let channel = self.channel.take().unwrap();
+        let channel = driver.channel.take().unwrap();
         // TODO: If the transmit fails, we’re in an unsafe state and future calls to write() will panic.
         // This is currently unavoidable since transmit consumes the channel on error.
         // This is a known design flaw in the current RMT API and will be fixed soon.
         // We should adjust our usage accordingly as soon as possible.
         match channel
-            .transmit(&self.rmt_buffer)
+            .transmit(&driver.rmt_buffer)
             .map_err(|(e, _)| e)?
             .wait()
         {
             Ok(chan) => {
-                self.channel = Some(chan);
+                driver.channel = Some(chan);
+
+                // reset delay
+                self.delay.delay_us(driver.reset_us as u32);
                 Ok(())
             }
             Err((e, chan)) => {
-                self.channel = Some(chan);
+                driver.channel = Some(chan);
                 Err(AdapterError::TransmissionError(e))
             }
         }
     }
 }
 
-impl<'d, const BUFFER_SIZE: usize, C, Order> SmartLedsWrite
-    for RmtSmartLeds<'d, BUFFER_SIZE, Blocking, C, Order>
+impl<'d, D: embedded_hal::delay::DelayNs, DriverBorrow, const BUFFER_SIZE: usize, C, Order>
+    SmartLedsWrite for Handle<'d, D, DriverBorrow, BUFFER_SIZE, Blocking, C, Order>
 where
     C: Color,
     Order: ColorOrder<C>,
+    DriverBorrow: BorrowMut<RmtSmartLeds<'d, BUFFER_SIZE, Blocking, C, Order>>,
 {
     type Error = AdapterError;
     type Color = C;
@@ -576,16 +641,17 @@ where
         T: IntoIterator<Item = I>,
         I: Into<Self::Color>,
     {
-        self.create_rmt_data(iterator)?;
+        self.driver.borrow_mut().create_rmt_data(iterator)?;
         self.flush()
     }
 }
 
-impl<'d, const BUFFER_SIZE: usize, C, Order> SmartLedsWriteAsync
-    for RmtSmartLeds<'d, BUFFER_SIZE, Async, C, Order>
+impl<'d, D: embedded_hal_async::delay::DelayNs, DriverBorrow, const BUFFER_SIZE: usize, C, Order>
+    SmartLedsWriteAsync for Handle<'d, D, DriverBorrow, BUFFER_SIZE, Async, C, Order>
 where
     C: Color,
     Order: ColorOrder<C>,
+    DriverBorrow: BorrowMut<RmtSmartLeds<'d, BUFFER_SIZE, Async, C, Order>>,
 {
     type Error = AdapterError;
     type Color = C;
@@ -600,21 +666,26 @@ where
     {
         // we split the future into a creation part and a sending part
         // so we can prepare multiple futures and send/await then all at the same time
-        let res = self.create_rmt_data(iterator);
+        let res = self.driver.borrow_mut().create_rmt_data(iterator);
 
         async move {
             res?;
+
+            let driver = self.driver.borrow_mut();
+
             // Perform the actual RMT operation. We use the u32 values here right away.
-            self.channel
+            driver
+                .channel
                 .as_mut()
                 .unwrap()
-                .transmit(&self.rmt_buffer)
+                .transmit(&driver.rmt_buffer)
                 .await?;
+            // reset pulse delay
+            self.delay.delay_us(driver.reset_us as u32).await;
             Ok(())
         }
     }
 }
-
 fn convert_colors_to_pulse<'a, C, Order>(
     value: &C,
     mut_iter: &mut impl Iterator<Item = &'a mut PulseCode>,

@@ -27,7 +27,7 @@
 use core::cfg_select;
 use esp_backtrace as _;
 use esp_hal::{delay::Delay, rmt::Rmt, time::Rate};
-use esp_hal_smartled::{RmtSmartLeds, buffer_size, color_order};
+use esp_hal_smartled::{Handle, RmtSmartLeds, buffer_size, color_order};
 use smart_leds::{
     RGB8, SmartLedsWrite, brightness, gamma,
     hsv::{Hsv, hsv2rgb},
@@ -81,7 +81,7 @@ fn main() -> ! {
         )
         .unwrap()
     };
-    let delay = Delay::new();
+    let mut delay = Delay::new();
 
     let mut color = Hsv {
         hue: 0,
@@ -100,6 +100,10 @@ fn main() -> ! {
             // color to the other) to the RGB color space that we can then send to the LED
             data[hue as usize] = hsv2rgb(color);
         }
+
+        // handle that allows driving the led strip
+        let mut led = Handle::new(&mut led, &mut delay);
+
         // When sending to the LED, we do a gamma correction first (see smart_leds
         // documentation for details) and then limit the brightness to 10 out of 255 so
         // that the output it's not too bright.

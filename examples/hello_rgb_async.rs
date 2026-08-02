@@ -21,7 +21,7 @@ use esp_backtrace as _;
 use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::{rmt::Rmt, time::Rate};
-use esp_hal_smartled::{RmtSmartLeds, buffer_size, color_order};
+use esp_hal_smartled::{Handle, RmtSmartLeds, buffer_size, color_order};
 use smart_leds::RGB8;
 use smart_leds::{
     SmartLedsWriteAsync, brightness, gamma,
@@ -91,6 +91,9 @@ async fn main(spawner: Spawner) -> ! {
 
     spawner.spawn(background_print().unwrap());
 
+    // delay struct, could be anything that implements the trait
+    let mut delay = embassy_time::Delay;
+
     loop {
         // Iterate over the rainbow!
         for hue in 0..=255 {
@@ -101,6 +104,9 @@ async fn main(spawner: Spawner) -> ! {
             // When sending to the LED, we do a gamma correction first (see smart_leds
             // documentation for details) and then limit the brightness to 10 out of 255 so
             // that the output it's not too bright.
+
+            // handle that allows driving the led strip
+            let mut led = Handle::new(&mut led, &mut delay);
 
             // This call already prepares the buffer.
             let fut = led.write(brightness(gamma(data.iter().cloned()), 10));
