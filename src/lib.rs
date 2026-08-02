@@ -213,7 +213,7 @@ pub const fn buffer_size<C: Color>(led_count: usize) -> usize {
     //   Nr. of LEDs
     //   * channels
     //   * pulses per channel (=bitcount)
-    //  ) + 1 additional pulse for the end delimiter + 1 reset
+    //  ) + 1 additional pulse for the end delimiter
     led_count * (size_of::<C::ChannelType>() * 8) * C::CHANNELS as usize + 1
 }
 
@@ -680,7 +680,8 @@ where
                 .unwrap()
                 .transmit(&driver.rmt_buffer)
                 .await?;
-            // reset pulse delay
+
+            // reset delay
             self.delay.delay_us(driver.reset_us as u32).await;
             Ok(())
         }
