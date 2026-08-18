@@ -40,12 +40,12 @@ use core::{borrow::BorrowMut, fmt::Debug, marker::PhantomData};
 pub use color_order::ColorOrder;
 use esp_hal::{
     Async, Blocking, DriverMode,
-    clock::Clocks,
     gpio::{Level, interconnect::PeripheralOutput},
     rmt::{
         Channel, ConfigError as RmtConfigError, Error as RmtError, PulseCode, Tx, TxChannelConfig,
         TxChannelCreator,
     },
+    time::Rate,
 };
 use num_traits::Unsigned;
 use smart_leds_trait::{CctWhite, RGB, RGBCCT, RGBW, SmartLedsWrite, SmartLedsWriteAsync, White};
@@ -347,6 +347,7 @@ where
     zero_pulse: PulseCode,
     one_pulse: PulseCode,
     reset_us: u16,
+    rmt_freq: Rate,
     _order: PhantomData<Order>,
     _color: PhantomData<C>,
 }
@@ -388,12 +389,17 @@ where
     /// # Errors
     ///
     /// If any configuration issue with the RMT [`Channel`] occurs, the error will be returned.
-    pub fn new<Ch, P>(timing: Timing, channel: Ch, pin: P) -> Result<Self, RmtConfigError>
+    pub fn new<Ch, P>(
+        timing: Timing,
+        channel: Ch,
+        pin: P,
+        rmt_freq: Rate,
+    ) -> Result<Self, RmtConfigError>
     where
         Ch: TxChannelCreator<'d, Mode>,
         P: PeripheralOutput<'d>,
     {
-        Self::new_with_memsize(timing, channel, pin, 1)
+        Self::new_with_memsize(timing, channel, pin, 1, rmt_freq)
     }
     /// Creates a new [`RmtSmartLeds`] that drives the provided output using the given RMT channel.
     ///
@@ -414,6 +420,7 @@ where
         channel: Ch,
         pin: P,
         memsize: u8,
+        rmt_freq: Rate,
     ) -> Result<Self, RmtConfigError>
     where
         Ch: TxChannelCreator<'d, Mode>,
@@ -428,7 +435,7 @@ where
 
         let channel = channel.configure_tx(&config)?.with_pin(pin);
 
-        let (zero_pulse, one_pulse) = Self::get_timings_for(&timing);
+        let (zero_pulse, one_pulse) = Self::get_timings_for(&timing, rmt_freq);
 
         Ok(Self {
             channel: Some(channel),
@@ -437,24 +444,23 @@ where
             zero_pulse,
             one_pulse,
             reset_us: timing.reset_us,
+            rmt_freq,
             _order: PhantomData,
             _color: PhantomData,
         })
     }
 
     /// Returns (zero_pulse, one_pulse)
-    fn get_timings_for(t: &Timing) -> (PulseCode, PulseCode) {
-        // Assume the RMT peripheral is set up to use the APB clock
-        let clocks = Clocks::get();
+    fn get_timings_for(t: &Timing, rmt_freq: Rate) -> (PulseCode, PulseCode) {
         // convert to the MHz value to simplify nanosecond calculations
-        let src_clock = clocks.apb_clock.as_hz() / 1_000_000;
+        let src_clock = rmt_freq.as_mhz();
 
         (zero_pulse(t, src_clock), one_pulse(&t, src_clock))
     }
 
     /// Modifies the timing for the LED driver.
     pub fn set_timing(&mut self, t: Timing) {
-        let (zero_pulse, one_pulse) = Self::get_timings_for(&t);
+        let (zero_pulse, one_pulse) = Self::get_timings_for(&t, self.rmt_freq);
         self.zero_pulse = zero_pulse;
         self.one_pulse = one_pulse;
         self.reset_us = t.reset_us;

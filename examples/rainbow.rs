@@ -78,6 +78,7 @@ fn main() -> ! {
             rmt.channel0,
             led_pin,
             2,
+            freq,
         )
         .unwrap()
     };
