@@ -70,7 +70,7 @@ pub struct Timing {
     /// Depending on the rmt's frequency, it can have a maximum of ~800us at 80mhz,
     /// ~2000us at 32mhz, etc.
     ///
-    /// The calculation is: max_reset_pulse_us = (0xfffe * 2) / rmt_freq_mhz.
+    /// The calculation is: max_reset_pulse_us = 0xfffe / rmt_freq_mhz.
     pub reset_us: u16,
 }
 
